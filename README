@@ -1,0 +1,10 @@
+Build instructions:
+
+Build and install Apache2 with mod_ssl enabled.
+
+Compile the module:
+/path/to/apache2/bin/apxs -c mod_dtcpip_auth.c s_dtcp_interface.c
+
+Install and activate the module:
+sudo /path/to/apache2/bin/apxs -i -a mod_dtcpip_auth.la
+
