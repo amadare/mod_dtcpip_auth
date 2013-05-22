@@ -36,6 +36,6 @@
 APR_DECLARE_OPTIONAL_FN(int, validate_dtcp_suppdata, (unsigned char *suppdata, unsigned short suppdata_len, 
     int isServer));
 APR_DECLARE_OPTIONAL_FN(int, format_dtcp_suppdata, (unsigned char *suppdata, unsigned short *suppdata_len, 
-    unsigned char *pServerSuppdata, int isServer));
+    unsigned char *pServerSuppdata, int isServer, int sendCert));
 
 #endif // __H_DTCPIP_AUTH

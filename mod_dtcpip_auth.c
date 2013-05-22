@@ -144,7 +144,7 @@ static void mod_dtcpip_auth_register_hooks (apr_pool_t *p)
 
 
 int format_dtcp_suppdata(unsigned char *suppdata, unsigned short *suppdata_len, 
-    unsigned char *pServerSuppdata, int isServer)
+    unsigned char *pServerSuppdata, int isServer, int sendCert)
 {
     // suppdate array has already been allocated by caller
     
@@ -198,20 +198,21 @@ int format_dtcp_suppdata(unsigned char *suppdata, unsigned short *suppdata_len,
         index += 32;
     }
 
-    
-    fprintf (stderr, "calling DTCPIPAuth_GetLocalCert\n");
-    fflush(stderr);
-    // add local DTCP cert to supp data
-    nReturnCode = DTCPIPAuth_GetLocalCert (pLocalCert, &uLocalCertSize);
-    fprintf(stderr, "DTCPIPAuth_GetLocalCert returned %d\n", nReturnCode);
-    fflush(stderr);
-    if (nReturnCode != 0)
+    if (sendCert)
     {
-        printf ("###########################################################\n");
-        return -1;
-    }
+        fprintf (stderr, "calling DTCPIPAuth_GetLocalCert\n");
+        fflush(stderr);
+        // add local DTCP cert to supp data
+        nReturnCode = DTCPIPAuth_GetLocalCert (pLocalCert, &uLocalCertSize);
+        fprintf(stderr, "DTCPIPAuth_GetLocalCert returned %d\n", nReturnCode);
+        fflush(stderr);
+        if (nReturnCode != 0)
+        {
+            printf ("###########################################################\n");
+            return -1;
+        }
 
-    fprintf(stderr, "uLocalCertSize = %d\n", uLocalCertSize);
+        fprintf(stderr, "uLocalCertSize = %d\n", uLocalCertSize);
 /*    printf("LocalCert:\n");
     for (i=0; i<uLocalCertSize; i++)
 	{
@@ -224,24 +225,22 @@ int format_dtcp_suppdata(unsigned char *suppdata, unsigned short *suppdata_len,
     printf ("\n");
     */
 
-    memcpy (suppdata + index, pLocalCert, uLocalCertSize);
-    index += uLocalCertSize;
-    
+        memcpy (suppdata + index, pLocalCert, uLocalCertSize);
+        index += uLocalCertSize;
 
+        // add signature of local DTCP cert to supp data
+        nReturnCode =  DTCPIPAuth_SignData(pLocalCert, uLocalCertSize, pSignature,   
+            &uSignatureSize);
+        fprintf(stderr, "DTCPIPAuth_SignData returned %d\n", nReturnCode);
+        fflush(stderr);
 
-    // add signature of local DTCP cert to supp data
-    nReturnCode =  DTCPIPAuth_SignData(pLocalCert, uLocalCertSize, pSignature,   
-        &uSignatureSize);
-    fprintf(stderr, "DTCPIPAuth_SignData returned %d\n", nReturnCode);
-    fflush(stderr);
+        if (nReturnCode != 0)
+        {
+            printf ("###########################################################\n");
+            return -1;
+        }
 
-    if (nReturnCode != 0)
-    {
-        printf ("###########################################################\n");
-        return -1;
-    }
-
-    fprintf(stderr, "uSignatureSize = %d\n", uSignatureSize);
+        fprintf(stderr, "uSignatureSize = %d\n", uSignatureSize);
 /*    fprintf(stderr, "Signature:\n");
     for (i=0; i<uSignatureSize; i++)
     {
@@ -254,9 +253,9 @@ int format_dtcp_suppdata(unsigned char *suppdata, unsigned short *suppdata_len,
     printf ("\n");
     */
 
-    memcpy (suppdata + index, pSignature, uSignatureSize);
-    index += uSignatureSize;
-
+        memcpy (suppdata + index, pSignature, uSignatureSize);
+        index += uSignatureSize;
+    }
 
     *suppdata_len = index;
 
