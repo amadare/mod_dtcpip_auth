@@ -32,8 +32,8 @@
 #define __H_MOD_DTCPIP_AUTH
 
 #include "dtcpip_auth.h"
-static int validate_dtcp_suppdata(unsigned char *suppdata, unsigned short suppdata_len, int isServer);
+static int validate_dtcp_suppdata(unsigned char *suppdata, unsigned short suppdata_len, int isServer, conn_rec *c);
 static int format_dtcp_suppdata(unsigned char *suppdata, unsigned short *suppdata_len, 
-    unsigned char *pServerSuppdata, int isServer, int sendCert);
+    unsigned char *pServerSuppdata, int isServer, int sendCert, X509 *cert, conn_rec *c);
 
 #endif // __H_MOD_DTCPIP_AUTH

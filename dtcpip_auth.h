@@ -29,13 +29,14 @@
 // COPYRIGHT_END
 
 #include "apr_optional.h"
+#include <openssl/ssl.h>
 
 #ifndef __H_DTCPIP_AUTH
 #define __H_DTCPIP_AUTH
 
 APR_DECLARE_OPTIONAL_FN(int, validate_dtcp_suppdata, (unsigned char *suppdata, unsigned short suppdata_len, 
-    int isServer));
+    int isServer, conn_rec *c));
 APR_DECLARE_OPTIONAL_FN(int, format_dtcp_suppdata, (unsigned char *suppdata, unsigned short *suppdata_len, 
-    unsigned char *pServerSuppdata, int isServer, int sendCert));
+    unsigned char *pServerSuppdata, int isServer, int sendCert, X509 *cert, conn_rec *c));
 
 #endif // __H_DTCPIP_AUTH

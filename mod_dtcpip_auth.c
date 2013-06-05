@@ -33,17 +33,14 @@
 #include "http_log.h"
 #include "s_dtcp_interface.h"
 #include "mod_dtcpip_auth.h"
+#include <openssl/ssl.h>
 #include <time.h>
+#include <apr_strings.h>
 
 static void mod_dtcpip_auth_register_hooks (apr_pool_t *p);
 
 const char* set_dtcp_dll_path(cmd_parms* cmd, void *cfg, const char* arg);
 const char* set_dtcp_key_dir(cmd_parms* cmd, void *cfg, const char* arg);
-
-// GORP: g_most_recent_nonce is NOT safe for multiple simultaneous session creations -- rework
-static unsigned char g_most_recent_nonce[32];
-
-static int g_bRandonNumInitialized = 0;
 
 // GORP: get this from tls1.h instead of here
 #define TLSEXT_AUTHZDATAFORMAT_dtcp 225
@@ -61,7 +58,7 @@ static void *create_dtcpip_auth_srv_config(apr_pool_t *p, server_rec *s)
 //    fprintf (stderr, "Inside create_dtcpip_auth_srv_config\n");
 //    fflush (stderr);
     
-    conf = apr_palloc(p, sizeof(*conf));
+    conf = apr_pcalloc(p, sizeof(*conf));
 
     conf->dtcp_dll_path = NULL;
     conf->dtcp_key_storage_dir = NULL;
@@ -130,6 +127,8 @@ static int mod_dtcpip_auth_post_config (apr_pool_t *pconf, apr_pool_t *plog,
     fprintf(stderr,"mod_dtcpip_auth_post_config: initDTCP returned %d\n", nReturn);
     fflush(stderr);
 
+    srand((unsigned)time(NULL)); 
+
     return OK;
 }
 
@@ -142,78 +141,49 @@ static void mod_dtcpip_auth_register_hooks (apr_pool_t *p)
     APR_REGISTER_OPTIONAL_FN(format_dtcp_suppdata);
 }
 
-
-int format_dtcp_suppdata(unsigned char *suppdata, unsigned short *suppdata_len, 
-    unsigned char *pServerSuppdata, int isServer, int sendCert)
+int format_dtcp_suppdata(unsigned char *suppdata, unsigned short *suppdata_len, unsigned char *pServerSuppdata, int isServer, int sendCert, X509 *cert, conn_rec *c)
 {
-    // suppdate array has already been allocated by caller
-    
+    // suppdata array has already been allocated by caller
     int nReturnCode = 0;
-    unsigned char pLocalCert[132];
-    unsigned int uLocalCertSize = 132;
-    unsigned char pSignature[40];
-    unsigned int uSignatureSize = 40;
+    unsigned char pLocalCert[1000];
+    unsigned int uLocalCertSize = 1000;
+    unsigned char pSignature[1000];
+    unsigned int uSignatureSize = 1000;
+    unsigned char *x509Cert, *p;
+    int x509CertLength;
     int i=0;
     int index = 0;
     unsigned short encodedLength = 0;
+    unsigned char stored_nonce[32];
 
-    fprintf (stderr, "###########################################################\n");
-    fprintf (stderr, "format_dtcp_suppdata\n");
+    fprintf(stderr, "format_dtcp_suppdata\n");
     fflush(stderr);
 
     suppdata[0] = TLSEXT_AUTHZDATAFORMAT_dtcp;
-    index  += 3;
+    index += 3;
 
-    if (isServer != 0)
+    for (i=0; i<8; i++)
     {
-        fprintf (stderr, "format_dtcp_suppdata -- 1\n");
-        fflush(stderr);
-        // generate nonce and persist it for later validation
-        if (g_bRandonNumInitialized == 0)
-        {
-            fprintf (stderr, "format_dtcp_suppdata -- 2\n");
-            fflush(stderr);
-            srand((unsigned)time(NULL)); 
-            g_bRandonNumInitialized = 1;
-            fprintf (stderr, "format_dtcp_suppdata -- 3\n");
-            fflush(stderr);
-        }
-        for (i=0; i<8; i++)
-        {
-            int randonNum = rand();
-            memcpy (g_most_recent_nonce + 4*i, &randonNum, 4);
-        }
-        fprintf (stderr, "format_dtcp_suppdata -- 4\n");
-        fflush(stderr);
-
-        memcpy (suppdata + index, g_most_recent_nonce, 32);
-        index += 32;
-    }
-    else
-    {
-        fprintf (stderr, "format_dtcp_suppdata -- 5\n");
-        fflush(stderr);
-        // copy nonce from server supp data to this supp data
-        memcpy (suppdata + index, pServerSuppdata + 3, 32);
-        index += 32;
+        int randonNum = rand();
+        memcpy (stored_nonce + 4*i, &randonNum, 4);
     }
 
-    if (sendCert)
+    memcpy (suppdata + index, stored_nonce, 32);
+    apr_table_setn(c->notes, "DTCP_NONCE", stored_nonce);
+    index += 32;
+    
+    if (sendCert && cert)
     {
-        fprintf (stderr, "calling DTCPIPAuth_GetLocalCert\n");
-        fflush(stderr);
-        // add local DTCP cert to supp data
         nReturnCode = DTCPIPAuth_GetLocalCert (pLocalCert, &uLocalCertSize);
-        fprintf(stderr, "DTCPIPAuth_GetLocalCert returned %d\n", nReturnCode);
-        fflush(stderr);
+        fprintf(stderr, "DTCPIPAuth_GetLocalCert returned %d, size %d\n", nReturnCode, uLocalCertSize);
+	fflush(stderr);
         if (nReturnCode != 0)
         {
-            printf ("###########################################################\n");
             return -1;
         }
 
-        fprintf(stderr, "uLocalCertSize = %d\n", uLocalCertSize);
-/*    printf("LocalCert:\n");
+/*    printf("uLocalCertSize = %d\n", uLocalCertSize);
+    printf("LocalCert:\n");
     for (i=0; i<uLocalCertSize; i++)
 	{
         printf ("0x%02x ", pLocalCert[i]);
@@ -223,25 +193,46 @@ int format_dtcp_suppdata(unsigned char *suppdata, unsigned short *suppdata_len,
         }
     }
     printf ("\n");
-    */
+   */
+
+        /*add DTCP cert size*/
+        suppdata[index++] = (uLocalCertSize >> 8) & 0xff;
+        suppdata[index++] = uLocalCertSize & 0xff;
 
         memcpy (suppdata + index, pLocalCert, uLocalCertSize);
         index += uLocalCertSize;
 
-        // add signature of local DTCP cert to supp data
+        x509CertLength = i2d_X509(cert, NULL);
+	x509Cert = apr_pcalloc(c->pool, x509CertLength) ;
+        if (x509Cert == NULL)
+        {
+            fprintf(stderr, "Unable to allocate buffer for x509 cert data\n");
+            fflush(stderr);
+            return -1;
+        }
+        fprintf(stderr, "x509 cert size %d\n", x509CertLength);
+        fflush(stderr);
+        /*add x509 cert size*/
+        suppdata[index++] = (x509CertLength >> 8) & 0xff;
+        suppdata[index++] = x509CertLength & 0xff;
+
+        p = x509Cert;
+        i2d_X509(cert, &p);
+        memcpy (suppdata + index, x509Cert, x509CertLength);
+        index += x509CertLength;
+
+        /*TODO: add x509 cert to SignData */
         nReturnCode =  DTCPIPAuth_SignData(pLocalCert, uLocalCertSize, pSignature,   
             &uSignatureSize);
         fprintf(stderr, "DTCPIPAuth_SignData returned %d\n", nReturnCode);
         fflush(stderr);
-
         if (nReturnCode != 0)
         {
-            printf ("###########################################################\n");
             return -1;
         }
 
-        fprintf(stderr, "uSignatureSize = %d\n", uSignatureSize);
-/*    fprintf(stderr, "Signature:\n");
+/*    printf("uSignatureSize = %d\n", uSignatureSize);
+    printf("Signature:\n");
     for (i=0; i<uSignatureSize; i++)
     {
         printf ("0x%02x ", pSignature[i]);
@@ -256,6 +247,11 @@ int format_dtcp_suppdata(unsigned char *suppdata, unsigned short *suppdata_len,
         memcpy (suppdata + index, pSignature, uSignatureSize);
         index += uSignatureSize;
     }
+    else
+    {
+       fprintf(stderr, "-send_dtcp_cert not set or no cert available\n");
+       fflush(stderr);
+    }
 
     *suppdata_len = index;
 
@@ -265,118 +261,127 @@ int format_dtcp_suppdata(unsigned char *suppdata, unsigned short *suppdata_len,
     suppdata[2]  = encodedLength & 0xff;
 
     fprintf(stderr, "Generated Supp Data: len = %d\n", *suppdata_len);
+    fflush(stderr);
     for (i=0; i<*suppdata_len; i++)
     {
-        fprintf (stderr, "0x%02x ", suppdata[i]);
+        printf("0x%02x ", suppdata[i]);
         if (i%8 == 7)
         {
-            fprintf (stderr, "\n");
+            printf ("\n");
         }
     }
-    fprintf (stderr, "\n");
-
-    fprintf (stderr, "###########################################################\n");
+    fprintf(stderr, "\n");
     fflush(stderr);
-
     return 0;
 }
 
-
-int validate_dtcp_suppdata(unsigned char *suppdata, unsigned short suppdata_len, 
-    int isServer)
+int validate_dtcp_suppdata(unsigned char *suppdata, unsigned short suppdata_len, int isServer, conn_rec *c)
 {
     // Validate the suppdata by checking
     //    -- nonce is same sent by server
     //    -- signature of cert is valid
     //    -- cert itself is valid
 
-    unsigned char pRemoteCert[132];
+    unsigned char *pRemoteCert;
     unsigned int uRemoteCertSize = 0;
     unsigned char pSignature[40];
     unsigned int uSignatureSize = 40;
+    unsigned int x509Size = 0;
+    unsigned char * x509;
     unsigned char nonce[32];
-    int index = 3;
+    unsigned char *stored_nonce;
+    unsigned int index = 3;
     int i=0;
     int nReturnCode;
 
-    fprintf (stderr, "validate_dtcp_suppdata\n");
+    fprintf(stderr, "validate_dtcp_suppdata - suppdata length %d\n", suppdata_len);
     fflush(stderr);
-
     if (isServer != 0)
     {
-        memcpy (nonce, suppdata + index, 32);
-        index += 32;
+	memcpy (nonce, suppdata + index, 32);
+	index += 32;
 
-        // compare nonce to nonce sent previously
-        for (i=0; i<32; i++)
+	// compare nonce to nonce sent previously
+	stored_nonce = (unsigned char *)apr_table_get(c->notes, "DTCP_NONCE");
+
+	if (!stored_nonce)
         {
-            if (g_most_recent_nonce[i] != nonce[i])
-            {
-                fprintf (stderr, "validate_dtcp_suppdata: validation failed: invalid nonce: %d, %x, %x\n",
-                    i, g_most_recent_nonce[i], nonce[i]);
+	    fprintf(stderr, "validate_dtcp_suppdata: validation failed: no cached nonce\n");
+            fflush(stderr);
+	    return -1;
+        } 
+	for (i=0; i<32; i++)
+        {
+	    if (stored_nonce[i] != nonce[i])
+	    {
+	        fprintf(stderr, "validate_dtcp_suppdata: validation failed: invalid nonce: %d, %x, %x\n", i, stored_nonce[i], nonce[i]);
                 fflush(stderr);
-                return -1;
+		return -1;
             }
         }
     }
-    else
+    else 
     {
-        // skip nonce
+        //skip nonce
         index += 32;
     }
 
+    //next two bytes are dtcp cert length - always sent by client
+    uRemoteCertSize = (suppdata[index] << 8) | suppdata[index+1];
+    index += 2;
 
-    // need cert size -- check first cert byte for cert type (standard or extended)
-    switch (suppdata[index] & 0x0F)
-    {
-        case 1:
-            uRemoteCertSize = 88;
-            break;
-        case 2:
-            uRemoteCertSize = 132;
-            break;
-        default:
-            // error here
-            fprintf (stderr, "validate_dtcp_suppdata: validation failed: invalid cert type\n");
-	    fflush (stderr);
-            return -1;
-    }
-    
+    fprintf(stderr, "dtcp cert - size %d\n", uRemoteCertSize);
+    fflush(stderr);
+    pRemoteCert = apr_pcalloc(c->pool, uRemoteCertSize);
+
     memcpy (pRemoteCert, suppdata + index, uRemoteCertSize);
     index += uRemoteCertSize;
+
+    //if suppdata_len - index > signature size, x509 cert is present (x509 is optional from client)
+    //suppdata is received before peer cert - check peer cert outside of the callback
+    if ((suppdata_len - index) > uSignatureSize)
+    {
+        x509Size = (suppdata[index] << 8) | suppdata[index+1];
+        index += 2;
+        fprintf(stderr, "x509 - size %d\n", x509Size);
+        fflush(stderr);
+	x509 = apr_pcalloc(c->pool, x509Size);
+        memcpy (x509, suppdata + index, x509Size);
+        apr_table_setn(c->notes, "DTCP_X509", x509);
+	char * result;
+	result = apr_itoa(c->pool, x509Size);
+	apr_table_setn(c->notes, "DTCP_X509_LENGTH", result);
+        index += x509Size;
+    }
 
     memcpy (pSignature, suppdata + index, uSignatureSize);
     index += uSignatureSize;
 
-
     // validate signature
-    nReturnCode =  DTCPIPAuth_VerifyData(pRemoteCert, uRemoteCertSize, pSignature,   
+    nReturnCode =   DTCPIPAuth_VerifyData(pRemoteCert, uRemoteCertSize, pSignature,   
         pRemoteCert);
-    fprintf(stderr, "DTCPIPAuth_VerifyData returned %d\n", nReturnCode);
-    fflush (stderr);
-
+    fprintf(stderr, "DTCPIPAuth__VerifyData returned %d\n", nReturnCode);
+    fflush(stderr);
     if (nReturnCode != 0)
     {
-        fprintf (stderr, "validate_dtcp_suppdata: validation failed: invalid signature\n");
-	fflush (stderr);
+        fprintf(stderr, "validate_dtcp_suppdata: validation failed: invalid signature\n");
+        fflush(stderr);
         return -1;
     }
 
     // validate cert
     nReturnCode =  DTCPIPAuth_VerifyRemoteCert(pRemoteCert);
-    fprintf(stderr, "DTCPIPAuth_VerifyRemoteCert returned %d\n", nReturnCode);
-    fflush (stderr);
-
+    fprintf(stderr, "DTCPIPAuth__VerifyRemoteCert returned %d\n", nReturnCode);
+    fflush(stderr);
     if (nReturnCode != 0)
     {
-        fprintf (stderr, "validate_dtcp_suppdata: validation failed: invalid cert\n");
-        fflush (stderr);
+        fprintf(stderr, "validate_dtcp_suppdata: validation failed: invalid cert\n");
+        fflush(stderr);
         return -1;
     }
 
-    fprintf (stderr, "validate_dtcp_suppdata: validation successful\n");
-    fflush (stderr);
-
+    fprintf(stderr, "validate_dtcp_suppdata: validation successful\n");
+    fflush(stderr);
     return 0;
 }
 
