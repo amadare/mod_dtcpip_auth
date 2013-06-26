@@ -44,7 +44,6 @@ const char* set_dtcp_key_dir(cmd_parms* cmd, void *cfg, const char* arg);
 
 // GORP: get this from tls1.h instead of here
 #define TLSEXT_AUTHZDATAFORMAT_dtcp 225
-static unsigned char g_stored_nonce[32];
 
 
 typedef struct {
@@ -157,6 +156,8 @@ int format_dtcp_suppdata(unsigned char *suppdata, unsigned short *suppdata_len, 
     int i=0;
     int index = 0;
     unsigned short encodedLength = 0;
+    unsigned char * stored_nonce = NULL;
+    const unsigned int NONCE_SZ = 32;
 
     fprintf(stderr, "format_dtcp_suppdata\n");
     fflush(stderr);
@@ -164,15 +165,17 @@ int format_dtcp_suppdata(unsigned char *suppdata, unsigned short *suppdata_len, 
     suppdata[0] = TLSEXT_AUTHZDATAFORMAT_dtcp;
     index += 3;
 
+    
+    stored_nonce = apr_pcalloc(c->pool, NONCE_SZ);
     for (i=0; i<8; i++)
     {
         int randonNum = rand();
-        memcpy (g_stored_nonce + 4*i, &randonNum, 4);
+        memcpy (stored_nonce + 4*i, &randonNum, 4);
     }
 
-    memcpy (suppdata + index, g_stored_nonce, 32);
-//    apr_table_setn(c->notes, "DTCP_NONCE", g_stored_nonce);
-    index += 32;
+    memcpy (suppdata + index, stored_nonce, NONCE_SZ);
+    apr_table_setn(c->notes, "DTCP_NONCE", stored_nonce);
+    index += NONCE_SZ;
     
     nReturnCode = DTCPIPAuth_GetLocalCert (pLocalCert, &uLocalCertSize);
     fprintf(stderr, "DTCPIPAuth_GetLocalCert returned %d, size %d\n", nReturnCode, uLocalCertSize);
@@ -298,6 +301,7 @@ int validate_dtcp_suppdata(unsigned char *suppdata, unsigned short suppdata_len,
     unsigned int index = 3;
     int i=0;
     int nReturnCode;
+    unsigned char * stored_nonce;
 
     fprintf(stderr, "validate_dtcp_suppdata - suppdata length %d\n", suppdata_len);
     fflush(stderr);
@@ -307,9 +311,8 @@ int validate_dtcp_suppdata(unsigned char *suppdata, unsigned short suppdata_len,
         index += 32;
 
         // compare nonce to nonce sent previously
- //       stored_nonce = (unsigned char *)apr_table_get(c->notes, "DTCP_NONCE");
-
-        if (!g_stored_nonce)
+        stored_nonce = (unsigned char *)apr_table_get(c->notes, "DTCP_NONCE");
+        if (!stored_nonce)
         {
             fprintf(stderr, "validate_dtcp_suppdata: validation failed: no cached nonce\n");
             fflush(stderr);
@@ -317,9 +320,9 @@ int validate_dtcp_suppdata(unsigned char *suppdata, unsigned short suppdata_len,
         } 
         for (i=0; i<32; i++)
         {
-            if (g_stored_nonce[i] != nonce[i])
+            if (stored_nonce[i] != nonce[i])
             {
-                fprintf(stderr, "validate_dtcp_suppdata: validation failed: invalid nonce: %d, %x, %x\n", i, g_stored_nonce[i], nonce[i]);
+                fprintf(stderr, "validate_dtcp_suppdata: validation failed: invalid nonce: %d, %x, %x\n", i, stored_nonce[i], nonce[i]);
                 fflush(stderr);
                 return -1;
             }
@@ -344,6 +347,7 @@ int validate_dtcp_suppdata(unsigned char *suppdata, unsigned short suppdata_len,
     memcpy (pRemoteCert, suppdata + index, uRemoteCertSize);
     index += uRemoteCertSize;
 
+
     //if suppdata_len - index > signature size, x509 cert is present (x509 is optional from client)
     //suppdata is received before peer cert - check peer cert outside of the callback
     if ((suppdata_len - index) > uSignatureSize)
@@ -352,6 +356,7 @@ int validate_dtcp_suppdata(unsigned char *suppdata, unsigned short suppdata_len,
         index += 2;
         fprintf(stderr, "x509 - size %d\n", x509Size);
         fflush(stderr);
+ 
         x509 = apr_pcalloc(c->pool, x509Size);
         memcpy (x509, suppdata + index, x509Size);
         apr_table_setn(c->notes, "DTCP_X509", x509);
@@ -361,6 +366,13 @@ int validate_dtcp_suppdata(unsigned char *suppdata, unsigned short suppdata_len,
         index += x509Size;
 
         uNumSignedBytes += 2 + x509Size;
+    }
+    else
+    {
+        //  clear out the old values for DTCP_X509 and DTCP_X509_LENGTH from data table
+        // no leak here -- mem is allocated from conn_rec pool and will be free'd when pool is destroyed
+        apr_table_unset(c->notes, "DTCP_X509");
+        apr_table_unset(c->notes, "DTCP_X509_LENGTH");
     }
 
     memcpy (pSignature, suppdata + index, uSignatureSize);
