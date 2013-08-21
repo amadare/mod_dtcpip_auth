@@ -32,8 +32,15 @@
 #define __H_MOD_DTCPIP_AUTH
 
 #include "dtcpip_auth.h"
-static int validate_dtcp_suppdata(unsigned char *suppdata, unsigned short suppdata_len, int isServer, conn_rec *c);
-static int format_dtcp_suppdata(unsigned char *suppdata, unsigned short *suppdata_len, 
-    unsigned char *pServerSuppdata, int isServer, int sendCert, X509 *cert, conn_rec *c);
+static int validate_dtcp_suppdata(const unsigned char *suppdata, unsigned short suppdata_len, conn_rec *c);
+static int format_dtcp_suppdata(const unsigned char **suppdata, unsigned short *suppdata_len, X509 *cert,
+                                int send_certs, conn_rec *c);
+static void mod_dtcpip_auth_register_hooks (apr_pool_t *p);
+
+const char* set_library_path(cmd_parms* cmd, void *cfg, const char* arg);
+const char* set_key_dir(cmd_parms* cmd, void *cfg, const char* arg);
+const char* set_send_certs(cmd_parms* cmd, void *cfg, int flag);
+const char* set_require_reneg(cmd_parms* cmd, void *cfg, int flag);
+
 
 #endif // __H_MOD_DTCPIP_AUTH
