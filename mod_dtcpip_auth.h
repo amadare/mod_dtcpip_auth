@@ -35,6 +35,7 @@
 static int validate_dtcp_suppdata(const unsigned char *suppdata, unsigned short suppdata_len, conn_rec *c);
 static int format_dtcp_suppdata(const unsigned char **suppdata, unsigned short *suppdata_len, X509 *cert,
                                 int send_certs, conn_rec *c);
+static int propagate_validation (request_rec *r);
 static void mod_dtcpip_auth_register_hooks (apr_pool_t *p);
 
 const char* set_library_path(cmd_parms* cmd, void *cfg, const char* arg);

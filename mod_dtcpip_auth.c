@@ -30,6 +30,7 @@
 
 #include "httpd.h"
 #include "http_config.h"
+#include "http_request.h"
 #include "http_log.h"
 #include "s_dtcp_interface.h"
 #include "apr_strings.h"
@@ -203,7 +204,7 @@ static int tls_ext_generate(conn_rec *c, void *session,
                             unsigned short ext_type,
                             const unsigned char **out,
                             unsigned short *outlen,
-                            void *arg)
+                            int *al, void *arg)
 {
     SSL *ssl = (SSL *)session;
     dtcpip_auth_config_rec *config = NULL;
@@ -253,6 +254,9 @@ static int tls_suppdata_receive(conn_rec *c, void *session,
     fflush(stderr);
     if (ret == 0)
     {
+        apr_table_setn(c->notes, "DTCP_VALIDATION_SUCCESSFUL", "1");
+        fprintf(stderr,"setting dtcp_validation_successful to 1\n");
+        fflush(stderr);
         return OK;
     }
     else
@@ -266,7 +270,7 @@ static int tls_suppdata_generate(conn_rec *c, void *session,
                                  unsigned short suppdata_type,
                                  const unsigned char **out,
                                  unsigned short *outlen,
-                                 void *arg)
+                                 int *al, void *arg)
 {
     SSL *ssl = (SSL *)session;
     X509 *cert = NULL;
@@ -298,6 +302,7 @@ static int tls_suppdata_generate(conn_rec *c, void *session,
 
 static int handshake_complete(conn_rec *c, void *session, long num_renegotiations)
 {
+    //NOTE: returning OK from this function initiates renegotiation
     dtcpip_auth_config_rec *config = NULL;
 
     config = ap_get_module_config(c->base_server->module_config, &dtcpip_auth_module);
@@ -331,12 +336,27 @@ static int handshake_complete(conn_rec *c, void *session, long num_renegotiation
     return DECLINED;
 }
 
+static int propagate_validation(request_rec * r)
+{
+    const char * dtcp_authentication;
+    dtcp_authentication = apr_table_get(r->connection->notes, "DTCP_VALIDATION_SUCCESSFUL");
+    if (!dtcp_authentication)
+    {
+        dtcp_authentication = "0";
+    }
+
+    apr_table_setn(r->subprocess_env, "DTCP_VALIDATION_SUCCESSFUL", dtcp_authentication);
+    fprintf(stderr, "subprocess env dtcp validation successful set to %s\n", dtcp_authentication);
+    fflush(stderr);
+}
+
 static void mod_dtcpip_auth_register_hooks (apr_pool_t *p)
 {
     ap_hook_handler(mod_dtcpip_auth_handler, NULL, NULL, APR_HOOK_LAST);
+    ap_hook_fixups(propagate_validation, NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_post_config (mod_dtcpip_auth_post_config, NULL, NULL, APR_HOOK_MIDDLE);
 
-    APR_OPTIONAL_HOOK(ssl, tls_handshake_complete, handshake_complete, NULL, NULL, APR_HOOK_MIDDLE);
+    APR_OPTIONAL_HOOK(ssl, handshake_complete, handshake_complete, NULL, NULL, APR_HOOK_MIDDLE);
     APR_OPTIONAL_HOOK(ssl, srv_tls_ext_generate, tls_ext_generate, NULL, NULL, APR_HOOK_MIDDLE);
     APR_OPTIONAL_HOOK(ssl, srv_tls_ext_receive, tls_ext_receive, NULL, NULL, APR_HOOK_MIDDLE);
     APR_OPTIONAL_HOOK(ssl, srv_tls_suppdata_receive, tls_suppdata_receive, NULL, NULL, APR_HOOK_MIDDLE);
