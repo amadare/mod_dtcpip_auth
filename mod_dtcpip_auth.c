@@ -420,13 +420,16 @@ static int format_dtcp_suppdata(const unsigned char **suppdata, unsigned short *
         memcpy (nonce + 4*i, &randomNum, 4);
     }
 
+    //include nonce
+    pSignOffset = index;
+    uNumBytesToSign = 32;
+
     memcpy (suppdata_to_send + index, nonce, 32);
     index += 32;
 
     if (send_certs && cert)
     {
-        pSignOffset = index;
-        uNumBytesToSign = 2 + uLocalCertSize;
+        uNumBytesToSign += 2 + uLocalCertSize;
 
         /*add DTCP cert size*/
         suppdata_to_send[index++] = (uLocalCertSize >> 8) & 0xff;
@@ -517,6 +520,10 @@ static int validate_dtcp_suppdata(const unsigned char *suppdata, unsigned short 
     //type + length
     unsigned int index = 3;
 
+    //include nonce
+    pSignOffset = index;
+    uNumBytesSigned = 32;
+
     memcpy (nonce, suppdata + index, 32);
     index += 32;
 //    fprintf(stderr, "RECEIVED NONCE\n");
@@ -552,13 +559,11 @@ static int validate_dtcp_suppdata(const unsigned char *suppdata, unsigned short 
         }
     }
 
-    pSignOffset = index;
-
     //next two bytes are dtcp cert length - always sent by client
     uRemoteCertSize = (suppdata[index] << 8) | suppdata[index+1];
     index += 2;
 
-    uNumBytesSigned = 2 + uRemoteCertSize;
+    uNumBytesSigned += 2 + uRemoteCertSize;
 
     pRemoteCert = apr_palloc(c->pool, uRemoteCertSize);
 
