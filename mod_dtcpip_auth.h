@@ -40,6 +40,7 @@ const char* set_library_path(cmd_parms* cmd, void *cfg, const char* arg);
 const char* set_key_dir(cmd_parms* cmd, void *cfg, const char* arg);
 const char* set_send_certs(cmd_parms* cmd, void *cfg, int flag);
 const char* set_require_reneg(cmd_parms* cmd, void *cfg, int flag);
-
+const char* set_enable_dtcp_encryption(cmd_parms *cmd, void *cfg, int flag);
+const char* set_dtcp_encryption_port(cmd_parms *cmd, void *cfg, const char* arg);
 
 #endif // __H_MOD_DTCPIP_AUTH

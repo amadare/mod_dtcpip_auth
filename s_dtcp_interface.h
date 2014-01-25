@@ -52,5 +52,22 @@ int DTCPIPAuth_VerifyData(
     unsigned char* pSignature, 
     unsigned char* pRemoteCert );
 
+int DTCPIPSrc_Init (
+    unsigned short dtcp_port );
+
+int DTCPIPSrc_Open (
+    int* session_handle,
+    int is_audio_only );
+
+int DTCPIPSrc_AllocEncrypt (
+        int session_handle, unsigned char cci,
+        char* cleartext_data, unsigned int cleartext_size,
+        char** encrypted_data,unsigned int* encrypted_size );
+
+int DTCPIPSrc_Free (
+        char* encrypted_data );
+
+int DTCPIPSrc_Close (
+        int session_handle );
 
 #endif // __H_S_DTCP_INTERFACE

@@ -3,8 +3,17 @@ Build instructions:
 First build and install Apache2 with mod_ssl enabled.
 
 To compile the module:
-/path/to/apache2/bin/apxs -lcrypto -c mod_dtcpip_auth.c s_dtcp_interface.c
+/path/to/apache2/bin/apxs -lssl -lcrypto -I/path/to/ssl/include -L/path/to/ssl/lib -c mod_dtcpip_auth.c s_dtcp_interface.c
 
 To install and activate the module:
 sudo /path/to/apache2/bin/apxs -i -a mod_dtcpip_auth.la
 
+Available module flags:
+
+DTCPLibraryPath /absolute/path/to/dtcp_library.so
+DTCPKeyStorageDir /absolute/path/to/key_storage_dir
+# on/off values are case sensitive
+DTCPRequireReneg on
+DTCPSendCerts on
+DTCPEnableDTCPEncryption on
+DTCPEncryptionPort portnum

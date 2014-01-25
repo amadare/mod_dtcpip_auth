@@ -29,14 +29,13 @@
 #include "httpd.h"
 #include "http_config.h"
 #include "http_request.h"
-#include "http_log.h"
 #include "s_dtcp_interface.h"
 #include "apr_strings.h"
 #include "mod_dtcpip_auth.h"
 #include "mod_ssl.h"
 #include <openssl/ssl.h>
-#include <time.h>
 
+static const char dtcpEncryptFilterName[]="DtcpEncryptFilter";
 //length and type
 static const unsigned char auth_ext_data[]={1, TLSEXT_AUTHZDATAFORMAT_dtcp};
 static int g_bRandomNumInitialized = 0;
@@ -46,7 +45,15 @@ typedef struct {
     char *key_storage_dir;
     int send_certs;
     int require_reneg;
+    int enable_dtcp_encryption;
+    int dtcp_encryption_port;
 } dtcpip_auth_config_rec;
+
+struct filter_state {
+   apr_bucket_brigade *input_brigade;
+   apr_bucket_brigade *encrypted_brigade;
+   int session_handle;
+};
 
 static void *create_dtcpip_auth_srv_config(apr_pool_t *p, server_rec *s)
 {
@@ -58,7 +65,8 @@ static void *create_dtcpip_auth_srv_config(apr_pool_t *p, server_rec *s)
     conf->key_storage_dir = NULL;
     conf->send_certs = 0;
     conf->require_reneg = 0;
-
+    conf->enable_dtcp_encryption = 0;
+    conf->dtcp_encryption_port = 0;
     return conf;
 }
 
@@ -72,6 +80,10 @@ static const command_rec dtcpip_auth_cmds[] =
         NULL, OR_ALL, "Send DTCP and X509 certs in supplemental data"),
     AP_INIT_FLAG("DTCPRequireReneg", set_require_reneg,
         NULL, OR_ALL, "Send TLS extensions after renegotiation"),
+    AP_INIT_FLAG("DTCPEnableDTCPEncryption", set_enable_dtcp_encryption,
+        NULL, OR_ALL, "Support DTCP-based encryption of content (entire contents loaded in memory prior to encryption)"),
+    AP_INIT_TAKE1("DTCPEncryptionPort", set_dtcp_encryption_port,
+        NULL, OR_ALL, "Port supporting DTCP-based encryption"),
     {NULL}
 };
 
@@ -85,6 +97,160 @@ module AP_MODULE_DECLARE_DATA dtcpip_auth_module =
     dtcpip_auth_cmds,
     mod_dtcpip_auth_register_hooks,
 };
+
+static apr_status_t dtcpEncryptFilterOutFilter(ap_filter_t *filter,
+                                        apr_bucket_brigade *in_brigade)
+{
+    apr_bucket *in_bucket;
+    request_rec *r = filter->r;
+    conn_rec *c = r->connection;
+    int is_eos = 0;
+    struct filter_state *state;
+
+    if (APR_BRIGADE_EMPTY(in_brigade)) {
+        return APR_SUCCESS;
+    }
+
+    state = filter->ctx;
+    if (state == NULL)
+    {
+        int session_handle = -1;
+        int result = DTCPIPSrc_Open(&session_handle, 0);
+        if (result)
+        {
+            fprintf(stderr, "DTCPIPSrc_Open failed - %d\n", result);
+            fflush(stderr);
+            return APR_SUCCESS;
+        }
+        else
+        {
+            filter->ctx = state = apr_palloc(r->pool, sizeof *state);
+            state->session_handle = session_handle;
+            state->input_brigade = apr_brigade_create(r->pool, c->bucket_alloc);
+            state->encrypted_brigade = apr_brigade_create(r->pool, c->bucket_alloc);
+        }
+    }
+
+    //collect all input into a single brigade and encrypt the content of all buckets in a single call to allocencrypt
+    for (in_bucket = APR_BRIGADE_FIRST(in_brigade);
+         in_bucket != APR_BRIGADE_SENTINEL(in_brigade);
+         in_bucket = APR_BUCKET_NEXT(in_bucket))
+    {
+        const char *data = 0;
+        apr_size_t len = 0;
+        char *buf = 0;
+        apr_size_t n = 0;
+        apr_bucket *out_bucket = 0;
+
+
+        if(APR_BUCKET_IS_EOS(in_bucket))
+        {
+            is_eos = 1;
+            continue;
+        }
+
+        apr_bucket_read(in_bucket, &data, &len, APR_BLOCK_READ);
+
+        //populate a new bucket from the input bucket
+        buf = apr_bucket_alloc(len, c->bucket_alloc);
+        for(n=0 ; n < len ; ++n)
+        {
+            buf[n] = data[n];
+        }
+
+        out_bucket = apr_bucket_pool_create(buf, len, r->pool,
+                                         c->bucket_alloc);
+        APR_BRIGADE_INSERT_TAIL(state->input_brigade, out_bucket);
+    }
+
+    if (is_eos)
+    {
+        char *encrypted_data = 0;
+        unsigned int encrypted_size = 0;
+        apr_status_t status = 0;
+        char *all_data = 0;
+        apr_size_t all_data_size = 0;
+        int result = 0;
+        apr_bucket *encrypted_bucket_1 = 0;
+        apr_bucket *encrypted_bucket_2 = 0;
+        apr_bucket *eos_bucket = 0;
+        apr_size_t encrypted_bucket_size = 0;
+        char *buf = 0;
+        apr_size_t n = 0;
+
+        status = apr_brigade_pflatten(state->input_brigade,&all_data, &all_data_size, r->pool);
+
+        if (status != APR_SUCCESS)
+        {
+            fprintf(stderr, "unable to retrieve data to encrypt\n");
+            fflush(stderr);
+            return status;
+        }
+        if (all_data_size == 0)
+        {
+            fprintf(stderr, "no content to encrypt\n");
+            fflush(stderr);
+            return APR_SUCCESS;
+        }
+
+        int encrypt = DTCPIPSrc_AllocEncrypt(state->session_handle, 0x03,
+        (char *)all_data, all_data_size, &encrypted_data, &encrypted_size);
+
+        fprintf(stderr, "encrypt result %d - input length: %d, encrypted length: %d\n", encrypt, all_data_size, encrypted_size);
+        fflush(stderr);
+
+        if (encrypt)
+        {
+            return APR_SUCCESS;
+        }
+
+        //split encrypted data across two buckets in order to ensure chunked transfer encoding is supported
+        encrypted_bucket_size = encrypted_size / 2;
+
+        buf = apr_bucket_alloc(encrypted_size, c->bucket_alloc);
+        for(n=0 ; n < encrypted_size ; ++n)
+        {
+            buf[n] = encrypted_data[n];
+        }
+
+        encrypted_bucket_1 = apr_bucket_pool_create(buf, encrypted_bucket_size, r->pool,
+                                         c->bucket_alloc);
+        APR_BRIGADE_INSERT_TAIL(state->encrypted_brigade, encrypted_bucket_1);
+
+        //always call ap_pass_brigade with a a brigade which contains at least one (non-EOS) bucket prior to calling
+        //ap_pass_brigade which does include an EOS bucket in order to avoid a content-length header,
+        //facilitating chunked transfer encoding
+        ap_pass_brigade(filter->next,state->encrypted_brigade);
+
+        //now send the remaining data in the second call to ap_pass_brigade
+        encrypted_bucket_2 = apr_bucket_pool_create((buf + encrypted_bucket_size), (encrypted_size - encrypted_bucket_size), r->pool,
+                                         c->bucket_alloc);
+        APR_BRIGADE_INSERT_TAIL(state->encrypted_brigade, encrypted_bucket_2);
+
+        //include an EOS bucket
+        eos_bucket = apr_bucket_eos_create(c->bucket_alloc);
+        APR_BRIGADE_INSERT_TAIL(state->encrypted_brigade, eos_bucket);
+
+        result = DTCPIPSrc_Free(encrypted_data);
+        if (result)
+        {
+            fprintf(stderr, "DTCPIPSrc_Free - result %d\n", result);
+            fflush(stderr);
+        }
+
+        result = DTCPIPSrc_Close(state->session_handle);
+        if (result)
+        {
+            fprintf(stderr, "DTCPIPSrc_Close - result %d\n", result);
+            fflush(stderr);
+        }
+
+        apr_brigade_cleanup(in_brigade);
+        apr_brigade_cleanup(state->input_brigade);
+        return ap_pass_brigade(filter->next,state->encrypted_brigade);
+    }
+    return APR_SUCCESS;
+}
 
 const char *set_library_path(cmd_parms* cmd, void *cfg, const char* arg)
 {
@@ -120,6 +286,26 @@ const char *set_require_reneg(cmd_parms *cmd,
     return NULL;
 }
 
+const char *set_enable_dtcp_encryption(cmd_parms *cmd,
+                                    void *dcfg,
+                                    int flag)
+{
+    dtcpip_auth_config_rec *config = ap_get_module_config (cmd->server->module_config, &dtcpip_auth_module);
+    config->enable_dtcp_encryption = flag;
+
+    return NULL;
+}
+
+const char *set_dtcp_encryption_port(cmd_parms *cmd,
+                                    void *dcfg,
+                                    const char* arg)
+{
+    dtcpip_auth_config_rec *config = ap_get_module_config (cmd->server->module_config, &dtcpip_auth_module);
+    config->dtcp_encryption_port = apr_atoi64(arg);
+
+    return NULL;
+}
+
 static int mod_dtcpip_auth_handler (request_rec *r)
 {
     fprintf(stderr,"mod_dtcpip_auth_handler: \n");
@@ -131,6 +317,17 @@ static int mod_dtcpip_auth_handler (request_rec *r)
 static int mod_dtcpip_auth_post_config (apr_pool_t *pconf, apr_pool_t *plog,
     apr_pool_t *ptemp, server_rec *s)
 {
+    void *data = NULL;
+    const char *key = "dummy_post_config";
+
+    // Only perform post-config processing once
+    // See http://wiki.apache.org/httpd/ModuleLife
+    apr_pool_userdata_get(&data, key, s->process->pool);
+    if (data == NULL) {
+        apr_pool_userdata_set((const void *)1, key, apr_pool_cleanup_null, s->process->pool);
+        return OK;
+    }
+
     APR_OPTIONAL_FN_TYPE(ssl_register_srv_tls_ext_type) *register_srv_tls_ext = NULL;
     APR_OPTIONAL_FN_TYPE(ssl_register_srv_tls_suppdata_type) *register_srv_supp_data = NULL;
     int nReturn = 0;
@@ -143,11 +340,26 @@ static int mod_dtcpip_auth_post_config (apr_pool_t *pconf, apr_pool_t *plog,
         conf->require_reneg);
     fprintf(stderr,"mod_dtcpip_auth_post_config: send_certs = %d\n",
         conf->send_certs);
+    fprintf(stderr,"mod_dtcpip_auth_post_config: enable_dtcp_encryption = %d\n",
+        conf->enable_dtcp_encryption);
+    fprintf(stderr,"mod_dtcpip_auth_post_config: dtcp_encryption_port = %d\n",
+        conf->dtcp_encryption_port);
+
     fflush(stderr);
 
     nReturn = initDTCP(conf->library_path, conf->key_storage_dir);
     fprintf(stderr,"mod_dtcpip_auth_post_config: initDTCP returned %d\n", nReturn);
     fflush(stderr);
+
+    if (conf->enable_dtcp_encryption)
+    {
+        nReturn = DTCPIPSrc_Init(conf->dtcp_encryption_port);
+        fprintf(stderr,"mod_dtcpip_auth_post_config - DTCP encryption enabled - DTCPIPSrc_Init result: %d\n", nReturn);
+        fflush(stderr);
+    } else {
+        fprintf(stderr,"mod_dtcpip_auth_post_config: DTCP encryption not enabled\n");
+        fflush(stderr);
+    }
 
     srand((unsigned)time(NULL));
 
@@ -354,6 +566,9 @@ static void mod_dtcpip_auth_register_hooks (apr_pool_t *p)
     ap_hook_fixups(propagate_validation, NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_post_config (mod_dtcpip_auth_post_config, NULL, NULL, APR_HOOK_MIDDLE);
 
+    ap_register_output_filter(dtcpEncryptFilterName, dtcpEncryptFilterOutFilter, NULL,
+                              AP_FTYPE_RESOURCE);
+
     APR_OPTIONAL_HOOK(ssl, handshake_complete, handshake_complete, NULL, NULL, APR_HOOK_MIDDLE);
     APR_OPTIONAL_HOOK(ssl, srv_tls_ext_generate, tls_ext_generate, NULL, NULL, APR_HOOK_MIDDLE);
     APR_OPTIONAL_HOOK(ssl, srv_tls_ext_receive, tls_ext_receive, NULL, NULL, APR_HOOK_MIDDLE);
@@ -494,9 +709,11 @@ static int format_dtcp_suppdata(const unsigned char **suppdata, unsigned short *
 //    }
 //    fprintf (stderr, "\n");
 
+    fflush(stderr);
     return 0;
 
 err:
+    fflush(stderr);
     return -1;
 }
 
@@ -625,10 +842,11 @@ static int validate_dtcp_suppdata(const unsigned char *suppdata, unsigned short 
     }
 
     fprintf(stderr, "DTCP validation successful\n");
-
+    fflush(stderr);
     return 0;
 
 err:
+    fflush(stderr);
     return -1;
 }
 

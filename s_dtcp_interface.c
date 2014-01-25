@@ -36,31 +36,87 @@
 
 #include <windows.h>
 
+typedef int (_cdecl *DTCPCmnInit_PROC) (char *);
 typedef int (__cdecl *DTCPGetLocalCert_PROC)(unsigned char *, unsigned int *);
 typedef int (__cdecl *DTCPVerifyRemoteCert_PROC)(unsigned char *);
 typedef int (__cdecl *DTCPSignData_PROC)(unsigned char *, unsigned int, unsigned char *, unsigned int*);
 typedef int (__cdecl *DTCPVerifyData_PROC)(unsigned char *, unsigned int, unsigned char *, unsigned char*);
 typedef int (__cdecl *DTCPInit_PROC)(char *);
+// initializes the source -- the dtcp_port is the listener port to use for AKE
+typedef int (__cdecl *DTCPSrcInit_PROC)(unsigned short dtcp_port);
 
+// Opens a source session. I cant recall how the is_audio_only flag is used -- I need tocheck,
+// but it can be set to 0 (false) for now. session_handle is returned and is used to idetify
+// this session in subsequent DTCPIP source calls.
+typedef int (__cdecl *DTCPSrcOpen_PROC)(int* session_handle, int is_audio_only);
+
+// Encrypts a piece of cleartext data in a single PCP packet.
+// The cci parameter is the cci for the data stream; cci values are:
+// 0x00 extEmiCopyFree
+// 0x20 extEmiCopyFreeEpnAsserted
+// 0x01 extEmiNoMoreCopies
+// 0x02 extEmiCopyOneGenFormatCog
+// 0x03 extEmiCopyNever
+//
+typedef int (__cdecl *DTCPSrcAllocEncrypt_PROC)(int session_handle, unsigned char cci,
+char* cleartext_data, unsigned int cleartext_size,
+char** encrypted_data,unsigned int* encrypted_size);
+
+// frees the encrypted data buffer returned by dtcpip_src_alloc_encrypt
+typedef int (__cdecl *DTCPSrcFree_PROC)(char* encrypted_data);
+
+// closes a source session and frees resources for that session
+typedef int (__cdecl *DTCPSrcClose_PROC)(int session_handle);
 #elif __linux__
 
 #include <dlfcn.h>
 
+typedef int (*DTCPCmnInit_PROC)(char *);
 typedef int (*DTCPGetLocalCert_PROC)(unsigned char *, unsigned int *);
 typedef int (*DTCPVerifyRemoteCert_PROC)(unsigned char *);
 typedef int (*DTCPSignData_PROC)(unsigned char *, unsigned int, unsigned char *, unsigned int*);
 typedef int (*DTCPVerifyData_PROC)(unsigned char *, unsigned int, unsigned char *, unsigned char*);
 typedef int (*DTCPInit_PROC)(char *);
 
+// initializes the source -- the dtcp_port is the listener port to use for AKE
+typedef int (*DTCPSrcInit_PROC)(unsigned short dtcp_port);
+
+// Opens a source session. I cant recall how the is_audio_only flag is used -- I need tocheck,
+// but it can be set to 0 (false) for now. session_handle is returned and is used to idetify
+// this session in subsequent DTCPIP source calls.
+typedef int (*DTCPSrcOpen_PROC)(int* session_handle, int is_audio_only);
+
+// Encrypts a piece of cleartext data in a single PCP packet.
+// The cci parameter is the cci for the data stream; cci values are:
+// 0x00 extEmiCopyFree
+// 0x20 extEmiCopyFreeEpnAsserted
+// 0x01 extEmiNoMoreCopies
+// 0x02 extEmiCopyOneGenFormatCog
+// 0x03 extEmiCopyNever
+//
+typedef int (*DTCPSrcAllocEncrypt_PROC)(int session_handle, unsigned char cci,
+char* cleartext_data, unsigned int cleartext_size,
+char** encrypted_data,unsigned int* encrypted_size);
+
+// frees the encrypted data buffer returned by dtcpip_src_alloc_encrypt
+typedef int (*DTCPSrcFree_PROC)(char* encrypted_data);
+
+// closes a source session and frees resources for that session
+typedef int (*DTCPSrcClose_PROC)(int session_handle);
 #endif
 
-
+DTCPCmnInit_PROC            hDTCPCmnInit            = NULL;
 DTCPGetLocalCert_PROC       hDTCPGetLocalCert       = NULL;
 DTCPVerifyRemoteCert_PROC   hDTCPVerifyRemoteCert   = NULL;
 DTCPSignData_PROC           hDTCPSignData           = NULL;
 DTCPVerifyData_PROC         hDTCPVerifyData         = NULL;
 DTCPInit_PROC               hDTCPInit               = NULL;
 
+DTCPSrcInit_PROC            hDTCPSrcInit            = NULL;
+DTCPSrcOpen_PROC            hDTCPSrcOpen            = NULL;
+DTCPSrcAllocEncrypt_PROC    hDTCPSrcAllocEncrypt    = NULL;
+DTCPSrcFree_PROC            hDTCPSrcFree            = NULL;
+DTCPSrcClose_PROC           hDTCPSrcClose           = NULL;
 
 static int g_inited = 0;
 
@@ -143,16 +199,84 @@ int initDTCP(char *dllPath, char* keyStorageDir)
         return -105;
     }
 
-    nReturnCode = hDTCPInit (keyStorageDir);
-    fprintf (stderr, "hDTCPInit returned: %d\n", nReturnCode);
+    (void) dlerror();
+    hDTCPSrcInit = (DTCPSrcInit_PROC) dlsym(hModule, "dtcpip_src_init");
+    checkRet = dlerror();
+    if (NULL != checkRet || NULL == hDTCPSrcInit)
+    {
+        fprintf (stderr, "initDCP returning -106\n");
+    fflush(stderr);
+        return -106;
+    }
+
+    (void) dlerror();
+    hDTCPSrcOpen = (DTCPSrcOpen_PROC) dlsym(hModule, "dtcpip_src_open");
+    checkRet = dlerror();
+    if (NULL != checkRet || NULL == hDTCPSrcOpen)
+    {
+        fprintf (stderr, "initDCP returning -107\n");
+    fflush(stderr);
+        return -107;
+    }
+
+    (void) dlerror();
+    hDTCPSrcAllocEncrypt = (DTCPSrcAllocEncrypt_PROC) dlsym(hModule, "dtcpip_src_alloc_encrypt");
+    checkRet = dlerror();
+    if (NULL != checkRet || NULL == hDTCPSrcAllocEncrypt)
+    {
+        fprintf (stderr, "initDCP returning -108\n");
+    fflush(stderr);
+        return -108;
+    }
+
+    (void) dlerror();
+    hDTCPSrcFree = (DTCPSrcFree_PROC) dlsym(hModule, "dtcpip_src_free");
+    checkRet = dlerror();
+    if (NULL != checkRet || NULL == hDTCPSrcFree)
+    {
+        fprintf (stderr, "initDCP returning -109\n");
+    fflush(stderr);
+        return -109;
+    }
+
+    (void) dlerror();
+    hDTCPSrcClose = (DTCPSrcClose_PROC) dlsym(hModule, "dtcpip_src_close");
+    checkRet = dlerror();
+    if (NULL != checkRet || NULL == hDTCPSrcClose)
+    {
+        fprintf (stderr, "initDCP returning -110\n");
+    fflush(stderr);
+        return -110;
+    }
+
+    (void) dlerror();
+    hDTCPCmnInit = (DTCPCmnInit_PROC) dlsym(hModule, "dtcpip_cmn_init");
+    checkRet = dlerror();
+    if (NULL != checkRet || NULL == hDTCPCmnInit)
+    {
+        fprintf (stderr, "initDCP returning -111\n");
+        fprintf (stderr, "dlerror = %s\n", dlerror());
+    fflush(stderr);
+        return -111;
+    }
+
+    nReturnCode = hDTCPCmnInit (keyStorageDir);
+    fprintf (stderr, "hDTCPCmnInit called with %s - returned: %d\n", keyStorageDir, nReturnCode);
     fflush(stderr);
 
     if (nReturnCode == 0)
     {
-        fprintf (stderr, "initDCP successful\n");
-	fflush(stderr);
         g_inited = 1;
     }
+
+//    nReturnCode = hDTCPInit (keyStorageDir);
+//    fprintf (stderr, "hDTCPInit called with %s - returned: %d\n", keyStorageDir, nReturnCode);
+//    fflush(stderr);
+
+//    if (nReturnCode == 0)
+//    {
+//        g_inited = 1;
+//    }
 
     return nReturnCode;
 }
@@ -212,32 +336,86 @@ int initDTCP(char *dllPath, char* keyStorageDir)
         return -105;
     }
 
-    nReturnCode = hDTCPInit (keyStorageDir);
+    hDTCPSrcInit = (DTCPSrcInit_PROC) GetProcAddress(hDll, "dtcpip_src_init");
+    if (NULL == hDTCPSrcInit)
+    {
+        fprintf (stderr, "initDCP returning -106\n");
+    fflush(stderr);
+        return -106;
+    }
+
+    hDTCPSrcOpen = (DTCPSrcOpen_PROC) GetProcAddress(hDll, "dtcpip_src_open");
+    if (NULL == hDTCPSrcOpen)
+    {
+        fprintf (stderr, "initDCP returning -107\n");
+    fflush(stderr);
+        return -107;
+    }
+
+    hDTCPSrcAllocEncrypt = (DTCPSrcAllocEncrypt_PROC) GetProcAddress(hDll, "dtcpip_src_alloc_encrypt");
+    if (NULL == hDTCPSrcAllocEncrypt)
+    {
+        fprintf (stderr, "initDCP returning -108\n");
+    fflush(stderr);
+        return -108;
+    }
+
+    hDTCPSrcFree = (DTCPSrcFree_PROC) GetProcAddress(hDll, "dtcpip_src_free");
+    if (NULL == hDTCPSrcFree)
+    {
+        fprintf (stderr, "initDCP returning -109\n");
+    fflush(stderr);
+        return -109;
+    }
+
+    hDTCPSrcClose = (DTCPSrcClose_PROC) GetProcAddress(hDll, "dtcpip_src_close");
+    if (NULL == hDTCPSrcClose)
+    {
+        fprintf (stderr, "initDCP returning -110\n");
+    fflush(stderr);
+        return -110;
+    }
+
+    hDTCPCmnInit = (DTCPCmnInit_PROC) GetProcAddress(hDll, "dtcpip_cmn_init");
+    if (NULL == hDTCPCmnInit)
+    {
+        fprintf (stderr, "initDCP returning -111\n");
+    fflush(stderr);
+        return -111;
+    }
+
+    nReturnCode = hDTCPCmnInit (keyStorageDir);
 
     if (nReturnCode == 0)
     {
-        fprintf (stderr, "initDCP successful\n");
-	fflush(stderr);
-        g_inited = 1;
+        fprintf (stderr, "hDTCPCmnInit successful\n");
+    fflush(stderr);
+    g_inited = 1;
     }
+
+//    nReturnCode = hDTCPInit (keyStorageDir);
+
+//    if (nReturnCode == 0)
+//    {
+//        fprintf (stderr, "hDTCPInit successful\n");
+//    fflush(stderr);
+//    g_inited = 1;
+//    }
+
 
     return nReturnCode;
 }
 #endif
-
-
 
 int DTCPIPAuth_GetLocalCert (
     unsigned char *pLocalCert, 
     unsigned int *pLocalCertSize)
 {
     int nReturnCode = 0;
-    fprintf (stderr, "Inside DTCPIPAuth_GetLocalCert\n");
-    fflush (stderr);
 
     if (g_inited == 0)
     {
-	fprintf (stderr, "DTCPIPAuth_GetLocalCert: DTCP not inited, returning -1");
+    fprintf (stderr, "DTCPIPAuth_GetLocalCert: DTCP not inited, returning -1\n");
 	fflush (stderr);
         return -1;
     }
@@ -262,17 +440,14 @@ int DTCPIPAuth_VerifyRemoteCert(
 {
     int nReturnCode = 0;
 
-    fprintf (stderr, "Inside DTCPIPAuth_VerifyRemoteCert\n");
-    fflush (stderr);
-
     if (g_inited == 0)
     {
-	fprintf (stderr, "DTCPIPAuth_VerifyRemoteCert: DTCP not inited, returning -1");
+    fprintf (stderr, "DTCPIPAuth_VerifyRemoteCert: DTCP not inited, returning -1\n");
 	fflush (stderr);
         return -1;
     }
-	fprintf (stderr, "g_inited != 0");
-	fflush (stderr);
+    fprintf (stderr, "g_inited != 0\n");
+    fflush (stderr);
 
     if (NULL == hDTCPVerifyRemoteCert)
     {
@@ -297,12 +472,9 @@ int DTCPIPAuth_SignData(
 {
     int nReturnCode = 0;
 
-    fprintf (stderr, "Inside DTCPIPAuth_SignData\n");
-    fflush (stderr);
-
     if (g_inited == 0)
     {
-	fprintf (stderr, "DTCPIPAuth_SignData: DTCP not inited, returning -1");
+    fprintf (stderr, "DTCPIPAuth_SignData: DTCP not inited, returning -1\n");
 	fflush (stderr);
         return -1;
     }
@@ -310,6 +482,7 @@ int DTCPIPAuth_SignData(
     if (NULL == hDTCPSignData)
     {
         printf ("DTCPIPAuth_SignData returning -103\n");
+        fflush (stderr);
         return -103;
     }
     nReturnCode = hDTCPSignData (pData, nDataSz, pSignature, pnSignatureSz);
@@ -328,12 +501,9 @@ int DTCPIPAuth_VerifyData(
 {
     int nReturnCode = 0;
 
-    fprintf (stderr, "Inside DTCPIPAuth_VerifyData\n");
-    fflush (stderr);
-
     if (g_inited == 0)
     {
-	fprintf (stderr, "DTCPIPAuth_VerifyData: DTCP not inited, returning -1");
+    fprintf (stderr, "DTCPIPAuth_VerifyData: DTCP not inited, returning -1\n");
 	fflush (stderr);
         return -1;
     }
@@ -341,6 +511,7 @@ int DTCPIPAuth_VerifyData(
     if (NULL == hDTCPVerifyData)
     {
         printf ("DTCPIPAuth_VerifyData returning -104\n");
+        fflush (stderr);
         return -104;
     }
     nReturnCode = hDTCPVerifyData (pData, nDataSz, pSignature, pRemoteCert);
@@ -350,23 +521,90 @@ int DTCPIPAuth_VerifyData(
     return nReturnCode;
 }
 
-
-int DTCPIPAuth_Init(
-    char * pCertStorageDir)
+int DTCPIPSrc_Init(
+    unsigned short dtcp_port)
 {
     int nReturnCode = 0;
 
-
-    printf ("Inside DTCPIPAuth_Init\n");
-    if (NULL == hDTCPInit)
+    if (NULL == hDTCPSrcInit)
     {
-        printf ("DTCPIPAuth_Init returning -105\n");
-        return -105;
+        fprintf (stderr, "DTCPIPSrc_Init null - returning -106\n");
+        return -106;
     }
-    nReturnCode = hDTCPInit (pCertStorageDir);
-    printf ("DTCPIPAuth_Init returning %d\n", nReturnCode);
+    nReturnCode = hDTCPSrcInit (dtcp_port);
+    fprintf (stderr, "DTCPIPSrc_Init returning %d\n", nReturnCode);
+    fflush (stderr);
 
     return nReturnCode;
 }
 
+int DTCPIPSrc_Open (
+    int* session_handle,
+    int is_audio_only )
+{
+    int nReturnCode = 0;
 
+    if (NULL == hDTCPSrcOpen)
+    {
+        fprintf (stderr, "DTCPIPSrc_Open returning -107\n");
+        return -107;
+    }
+    nReturnCode = hDTCPSrcOpen (session_handle, is_audio_only);
+    fprintf (stderr, "DTCPIPSrc_Open returning %d\n", nReturnCode);
+    fflush (stderr);
+
+    return nReturnCode;
+}
+
+int DTCPIPSrc_AllocEncrypt (
+    int session_handle, unsigned char cci,
+    char* cleartext_data, unsigned int cleartext_size,
+    char** encrypted_data,unsigned int* encrypted_size )
+{
+    int nReturnCode = 0;
+
+    if (NULL == hDTCPSrcAllocEncrypt)
+    {
+        fprintf (stderr, "DTCPIPSrc_AllocEncrypt returning -108\n");
+        return -108;
+    }
+    nReturnCode = hDTCPSrcAllocEncrypt (session_handle, cci, cleartext_data, cleartext_size, encrypted_data, encrypted_size);
+    fprintf (stderr, "DTCPIPSrc_AllocEncrypt returning %d\n", nReturnCode);
+    fflush (stderr);
+
+    return nReturnCode;
+}
+
+int DTCPIPSrc_Free (
+    char* encrypted_data )
+{
+    int nReturnCode = 0;
+
+    if (NULL == hDTCPSrcFree)
+    {
+        fprintf (stderr, "DTCPIPSrc_Free returning -109\n");
+        return -109;
+    }
+    nReturnCode = hDTCPSrcFree (encrypted_data);
+    fprintf (stderr, "DTCPIPSrc_Free returning %d\n", nReturnCode);
+    fflush (stderr);
+
+    return nReturnCode;
+}
+
+int DTCPIPSrc_Close (
+    int session_handle )
+{
+    int nReturnCode = 0;
+
+    if (NULL == hDTCPSrcClose)
+    {
+        fprintf (stderr, "DTCPIPSrc_Close returning -110\n");
+        return -110;
+    }
+    nReturnCode = hDTCPSrcClose (session_handle);
+    fprintf (stderr, "DTCPIPSrc_Close returning %d\n", nReturnCode);
+    fflush (stderr);
+
+    return nReturnCode;
+}
